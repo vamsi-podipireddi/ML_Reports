@@ -6,13 +6,13 @@ from mlcore.evaluation.classification.metrics import compute_threshold_metrics
 from mlcore.evaluation.classification.plots import (
     build_confusion_metrics_figure,
     plot_reference_rocs,
-    plot_roc_curve_area
+    plot_roc_curve_area,
+    plot_reference_pr_curves,
+    plot_pr_curve_area
 )
 
 class BinaryClassifierEvaluator:
-    """
-    Evaluate binary classifiers with thresholded metrics and interactive plots.
-    """
+    """Evaluate binary classifiers with thresholded metrics and interactive plots."""
 
     def __init__(
         self,
@@ -31,97 +31,90 @@ class BinaryClassifierEvaluator:
         self.thresholds = thresholds or [i/20 for i in range(21)]
         self.default_threshold = default_threshold
         self.extra_metrics = extra_metrics
+
+        # internal caches
+        self._metrics_dfs: Dict[str, Any] = {}
         self.plots: Optional[Dict[str, Any]] = None
-        self.train_threshold_metrics = None
-        self.test_threshold_metrics = None
-        self.metrics = self.__metrics_to_calculate()
-        # find index safely
+
         try:
             self.default_idx = self.thresholds.index(default_threshold)
         except ValueError:
             self.default_idx = 0
 
     def __metrics_to_calculate(self) -> List[str]:
-        """
-        Return a list of metrics to calculate based on the extra_metrics flag.
-        """
         base = ["accuracy", "precision", "recall", "f1"]
         extra = [
             "specificity", "npv", "balanced_accuracy",
             "jaccard", "gmean", "hamming_loss"
         ] if self.extra_metrics else []
         return base + extra
-    
-    def compute_metrics(self, threshold: Optional[float] = None) -> Dict[str, float]:
-        """
-        Compute and store per-threshold metrics, returning a dict for one threshold.
-        """
-        train_threshold_metrics_df = compute_threshold_metrics(
-            df_spark=self.train_df,
-            label_col=self.label_col,
-            probability_col=self.probability_col,
-            thresholds=self.thresholds,
-            extra_metrics=self.extra_metrics
-        )
-        test_threshold_metrics_df = compute_threshold_metrics(
-            df_spark=self.test_df,
-            label_col=self.label_col,
-            probability_col=self.probability_col,
-            thresholds=self.thresholds,
-            extra_metrics=self.extra_metrics
-        )
 
-        self.train_threshold_metrics = train_threshold_metrics_df
-        self.test_threshold_metrics = test_threshold_metrics_df
-        # Select the requested threshold or default
-        target = threshold if threshold is not None else self.default_threshold
-        if target not in train_threshold_metrics_df["threshold"].values:
-            raise ValueError(f"Threshold {target} not in computed thresholds: {self.thresholds}")
-        train_row = train_threshold_metrics_df[train_threshold_metrics_df["threshold"] == target]
-
-        if target not in test_threshold_metrics_df["threshold"].values:
-            raise ValueError(f"Threshold {target} not in computed thresholds: {self.thresholds}")
-        test_row = test_threshold_metrics_df[test_threshold_metrics_df["threshold"] == target]
-        metrics_dict = {
-            "train": train_row[self.metrics].iloc[0].to_dict(),
-            "test": test_row[self.metrics].iloc[0].to_dict(),
-        }
-        return metrics_dict
-
-    def generate_plots(self) -> Dict[str, Any]:
-        """
-        Generate and return plots: confusion matrix slider and reference ROC curves.
-        """
-        # Ensure metrics are computed
-        if self.train_threshold_metrics is None or self.test_threshold_metrics is None:
-            self.compute_metrics()
-
-        # Confusion matrix with slider
-        train_cm_fig = build_confusion_metrics_figure(
-            df_metrics=self.train_threshold_metrics,
-            metrics=self.metrics,
-            default_idx=self.default_idx
-        )
-        test_cm_fig = build_confusion_metrics_figure(
-            df_metrics=self.test_threshold_metrics,
-            metrics=self.metrics,
-            default_idx=self.default_idx
-        )
-
-        # Reference ROC curves plot
-        ref_roc_fig = plot_reference_rocs()
-        roc_area_fig = plot_roc_curve_area(
-                self.train_threshold_metrics,
-                self.test_threshold_metrics  # or another DF for test if available
+    def _compute_for_df(self, df: DataFrame) -> Any:
+        """Compute & cache the full threshold-metrics DataFrame for a given split."""
+        key = "train" if df is self.train_df else "test"
+        if key not in self._metrics_dfs:
+            self._metrics_dfs[key] = compute_threshold_metrics(
+                df_spark=df,
+                label_col=self.label_col,
+                probability_col=self.probability_col,
+                thresholds=self.thresholds,
+                extra_metrics=self.extra_metrics
             )
-        # Aggregate in report
-        report: Dict[str, Any] = {
-            "confusion_matrix": {
-                "train": train_cm_fig,
-                "test": test_cm_fig,
-            },
-            "roc_reference": ref_roc_fig,
-            "roc_area": roc_area_fig,
+        return self._metrics_dfs[key]
+
+    def _select_row(self, df_metrics, threshold: float) -> Dict[str, float]:
+        """Validate & fetch the metrics dict for a single threshold from one DataFrame."""
+        if threshold not in df_metrics["threshold"].values:
+            raise ValueError(
+                f"Threshold {threshold} not in computed thresholds: {self.thresholds}"
+            )
+        row = df_metrics[df_metrics["threshold"] == threshold].iloc[0]
+        return row[self.__metrics_to_calculate()].to_dict()
+
+    def compute_metrics(self, threshold: Optional[float] = None) -> Dict[str, Dict[str, float]]:
+        """
+        Compute and return a dict:
+            { "train": {...metrics...}, "test": {...metrics...} }
+        """
+        tgt = threshold or self.default_threshold
+        dfs = {
+            split: self._compute_for_df(getattr(self, f"{split}_df"))
+            for split in ("train", "test")
         }
+        return {
+            split: self._select_row(df_metrics, tgt)
+            for split, df_metrics in dfs.items()
+        }
+
+    def plot(self) -> Dict[str, Any]:
+        """
+        Build and cache:
+          - confusion matrices for train & test,
+          - reference ROC,
+          - optional overlaid train/test ROC area.
+        """
+        # ensure metrics dataframes exist
+        dfs = {split: self._compute_for_df(getattr(self, f"{split}_df"))
+               for split in ("train", "test")}
+
+        cm_figs = {
+            split: build_confusion_metrics_figure(
+                df_metrics=df, metrics=self.__metrics_to_calculate(),
+                default_idx=self.default_idx
+            ) for split, df in dfs.items()
+        }
+
+        report: Dict[str, Any] = {
+            "confusion_matrix": cm_figs,
+            "roc_reference":    plot_reference_rocs(),
+            "roc_area":         plot_roc_curve_area(
+                                    dfs["train"], dfs["test"]
+                                ),
+            "pr_reference":     plot_reference_pr_curves(),
+            "pr_area":          plot_pr_curve_area(
+                                    dfs["train"], dfs["test"]
+                                )
+        }
+
         self.plots = report
         return report
