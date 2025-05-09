@@ -3,7 +3,10 @@
 from typing import Optional, List, Dict, Any
 from pyspark.sql import DataFrame
 from mlcore.evaluation.classification.metrics import compute_threshold_metrics
-from mlcore.evaluation.classification.plots import build_confusion_metrics_figure
+from mlcore.evaluation.classification.plots import (
+    build_confusion_metrics_figure,
+    plot_reference_rocs
+)
 
 class BinaryClassifierEvaluator:
     """
@@ -25,7 +28,7 @@ class BinaryClassifierEvaluator:
         self.thresholds = thresholds or [i/20 for i in range(21)]
         self.default_threshold = default_threshold
         self.extra_metrics = extra_metrics
-        self.plots = None
+        self.plots: Optional[Dict[str, Any]] = None
         self.threshold_metrics = None
         self.metrics = self.__metrics_to_calculate()
         # find index safely
@@ -34,7 +37,7 @@ class BinaryClassifierEvaluator:
         except ValueError:
             self.default_idx = 0
 
-    def __metrics_to_calculate(self):
+    def __metrics_to_calculate(self) -> List[str]:
         """
         Return a list of metrics to calculate based on the extra_metrics flag.
         """
@@ -47,7 +50,7 @@ class BinaryClassifierEvaluator:
     
     def compute_metrics(self, threshold: Optional[float] = None) -> Dict[str, float]:
         """
-        Populate self.results with a pandas DataFrame of per-threshold metrics.
+        Compute and store per-threshold metrics, returning a dict for one threshold.
         """
         threshold_metrics_df = compute_threshold_metrics(
             df_spark=self.df,
@@ -57,32 +60,36 @@ class BinaryClassifierEvaluator:
             extra_metrics=self.extra_metrics
         )
         self.threshold_metrics = threshold_metrics_df
-        # Select the default threshold metrics
-        if threshold is not None:
-            metrics = threshold_metrics_df[threshold_metrics_df["threshold"] == threshold][self.metrics]
-        else:
-            metrics = threshold_metrics_df[threshold_metrics_df["threshold"] == self.default_threshold][self.metrics]
-        # Convert to dictionary
-        return metrics.to_dict(orient="records")[0]
+        # Select the requested threshold or default
+        target = threshold if threshold is not None else self.default_threshold
+        if target not in threshold_metrics_df["threshold"].values:
+            raise ValueError(f"Threshold {target} not in computed thresholds: {self.thresholds}")
+        row = threshold_metrics_df[threshold_metrics_df["threshold"] == target]
+        metrics_dict = row[self.metrics].iloc[0].to_dict()
+        return metrics_dict
 
     def generate_plots(self) -> Dict[str, Any]:
         """
-        Return a Plotly Figure showing confusion matrix + metric bar chart slider.
+        Generate and return plots: confusion matrix slider and reference ROC curves.
         """
+        # Ensure metrics are computed
         if self.threshold_metrics is None:
             self.compute_metrics()
 
-        # Generate confusion matrix figure
+        # Confusion matrix with slider
         cm_fig = build_confusion_metrics_figure(
             df_metrics=self.threshold_metrics,
             metrics=self.metrics,
             default_idx=self.default_idx
         )
 
-        report = {
+        # Reference ROC curves plot
+        ref_roc_fig = plot_reference_rocs()
+
+        # Aggregate in report
+        report: Dict[str, Any] = {
             "confusion_matrix": cm_fig,
+            "roc_reference": ref_roc_fig,
         }
-
         self.plots = report
-
         return report
