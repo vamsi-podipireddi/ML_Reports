@@ -8,8 +8,11 @@ from mlcore.evaluation.classification.plots import (
     plot_reference_rocs,
     plot_roc_curve_area,
     plot_reference_pr_curves,
-    plot_pr_curve_area
+    plot_pr_curve_area,
+    plot_decision_threshold_slider,
+    plot_gain_lift_plotly,
 )
+
 
 class BinaryClassifierEvaluator:
     """Evaluate binary classifiers with thresholded metrics and interactive plots."""
@@ -28,7 +31,7 @@ class BinaryClassifierEvaluator:
         self.test_df = test_df
         self.label_col = label_col
         self.probability_col = probability_col
-        self.thresholds = thresholds or [i/20 for i in range(21)]
+        self.thresholds = thresholds or [i / 20 for i in range(21)]
         self.default_threshold = default_threshold
         self.extra_metrics = extra_metrics
 
@@ -43,22 +46,29 @@ class BinaryClassifierEvaluator:
 
     def __metrics_to_calculate(self) -> List[str]:
         base = ["accuracy", "precision", "recall", "f1"]
-        extra = [
-            "specificity", "npv", "balanced_accuracy",
-            "jaccard", "gmean", "hamming_loss"
-        ] if self.extra_metrics else []
+        extra = (
+            [
+                "specificity",
+                "npv",
+                "balanced_accuracy",
+                "jaccard",
+                "gmean",
+                "hamming_loss",
+            ]
+            if self.extra_metrics
+            else []
+        )
         return base + extra
 
-    def _compute_for_df(self, df: DataFrame) -> Any:
+    def _compute_for_df(self, df: DataFrame, key: str) -> Any:
         """Compute & cache the full threshold-metrics DataFrame for a given split."""
-        key = "train" if df is self.train_df else "test"
         if key not in self._metrics_dfs:
             self._metrics_dfs[key] = compute_threshold_metrics(
                 df_spark=df,
                 label_col=self.label_col,
                 probability_col=self.probability_col,
                 thresholds=self.thresholds,
-                extra_metrics=self.extra_metrics
+                extra_metrics=self.extra_metrics,
             )
         return self._metrics_dfs[key]
 
@@ -71,14 +81,16 @@ class BinaryClassifierEvaluator:
         row = df_metrics[df_metrics["threshold"] == threshold].iloc[0]
         return row[self.__metrics_to_calculate()].to_dict()
 
-    def compute_metrics(self, threshold: Optional[float] = None) -> Dict[str, Dict[str, float]]:
+    def compute_metrics(
+        self, threshold: Optional[float] = None
+    ) -> Dict[str, Dict[str, float]]:
         """
         Compute and return a dict:
             { "train": {...metrics...}, "test": {...metrics...} }
         """
         tgt = threshold or self.default_threshold
         dfs = {
-            split: self._compute_for_df(getattr(self, f"{split}_df"))
+            split: self._compute_for_df(getattr(self, f"{split}_df"), split)
             for split in ("train", "test")
         }
         return {
@@ -94,26 +106,45 @@ class BinaryClassifierEvaluator:
           - optional overlaid train/test ROC area.
         """
         # ensure metrics dataframes exist
-        dfs = {split: self._compute_for_df(getattr(self, f"{split}_df"))
-               for split in ("train", "test")}
+        dfs = {
+            split: self._compute_for_df(getattr(self, f"{split}_df"), split)
+            for split in ("train", "test")
+        }
 
         cm_figs = {
             split: build_confusion_metrics_figure(
-                df_metrics=df, metrics=self.__metrics_to_calculate(),
-                default_idx=self.default_idx
-            ) for split, df in dfs.items()
+                df_metrics=df,
+                metrics=self.__metrics_to_calculate(),
+                default_idx=self.default_idx,
+            )
+            for split, df in dfs.items()
         }
-
+        decision_threshold_figs = {
+            split: plot_decision_threshold_slider(
+                df_metrics=df,
+                metrics=self.__metrics_to_calculate(),
+                default_threshold=self.default_threshold,
+            )
+            for split, df in dfs.items()
+        }
+        # Gain/Lift plot
+        gain_lift_figs = {
+            split: plot_gain_lift_plotly(
+                df_spark=getattr(self, f"{split}_df"),
+                label_col=self.label_col,
+                bins=10,
+                probability_col=self.probability_col,
+            )
+            for split in ("train", "test")
+        }
         report: Dict[str, Any] = {
             "confusion_matrix": cm_figs,
-            "roc_reference":    plot_reference_rocs(),
-            "roc_area":         plot_roc_curve_area(
-                                    dfs["train"], dfs["test"]
-                                ),
-            "pr_reference":     plot_reference_pr_curves(),
-            "pr_area":          plot_pr_curve_area(
-                                    dfs["train"], dfs["test"]
-                                )
+            "roc_reference": plot_reference_rocs(),
+            "roc_area": plot_roc_curve_area(dfs["train"], dfs["test"]),
+            "pr_reference": plot_reference_pr_curves(),
+            "pr_area": plot_pr_curve_area(dfs["train"], dfs["test"]),
+            "decision_threshold": decision_threshold_figs,
+            "gain_lift": gain_lift_figs,
         }
 
         self.plots = report
