@@ -11,6 +11,7 @@ from mlcore.evaluation.classification.plots import (
     plot_pr_curve_area,
     plot_decision_threshold_slider,
     plot_gain_lift_plotly,
+    plot_calibration_curve_compare,
 )
 
 
@@ -137,6 +138,13 @@ class BinaryClassifierEvaluator:
             )
             for split in ("train", "test")
         }
+
+        calibration_curve_fig = plot_calibration_curve_compare(
+                self.train_df, self.test_df,
+                label_col=self.label_col,
+                probability_col=self.probability_col,
+                bins=5
+            )
         report: Dict[str, Any] = {
             "confusion_matrix": cm_figs,
             "roc_reference": plot_reference_rocs(),
@@ -145,6 +153,7 @@ class BinaryClassifierEvaluator:
             "pr_area": plot_pr_curve_area(dfs["train"], dfs["test"]),
             "decision_threshold": decision_threshold_figs,
             "gain_lift": gain_lift_figs,
+            "calibration_curve": calibration_curve_fig,
         }
 
         self.plots = report
